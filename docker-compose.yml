@@ -1,0 +1,29 @@
+services:
+  grocy:
+    image: lscr.io/linuxserver/grocy:latest
+    container_name: grocy
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/New_York
+    volumes:
+      - ./grocy-data:/config
+    ports:
+      - "9283:80"
+    restart: unless-stopped
+
+  agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: kitchen-agent
+    restart: unless-stopped
+    depends_on:
+      - grocy
+    env_file:
+      - .env
+    environment:
+      # Connect to Grocy internally via the Docker bridge network
+      - GROCY_URL=http://grocy:80
+    volumes:
+      - ./data:/app/data

@@ -1,0 +1,1 @@
+"""Kitchen Agent Application Package."""

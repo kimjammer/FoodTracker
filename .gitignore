@@ -1,0 +1,21 @@
+# Python / Virtual Environment
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+*.egg-info
+
+# Environment Secrets
+.env
+credentials.json
+token.json
+
+# Grocy Persistent Data & Local Runtime State
+grocy-data/
+data/
+
+# IDE
+.vscode/
+.idea/
