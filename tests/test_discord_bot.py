@@ -501,3 +501,28 @@ async def test_handle_receipt_attachment_uses_unicode_arrow():
         assert "$" not in detected_field.value
 
 
+@pytest.mark.asyncio
+async def test_meal_plan_approval_view_truncates_long_shopping_error():
+    view = MealPlanApprovalView(plan_summary="7-day plan")
+
+    interaction = MagicMock(spec=discord.Interaction)
+    interaction.response = MagicMock()
+    interaction.response.defer = AsyncMock()
+    interaction.followup = MagicMock()
+    interaction.followup.send = AsyncMock()
+    interaction.message = MagicMock()
+    interaction.message.embeds = [discord.Embed(title="Proposed Plan")]
+    interaction.message.edit = AsyncMock()
+
+    long_error = "Error calling tool 'meal_plan_shopping_tool': " + ("X" * 3000)
+
+    with patch("app.bot.views.execute_tool", new_callable=AsyncMock, return_value=long_error):
+        await view.approve_plan.callback(interaction)
+
+        interaction.message.edit.assert_called_once()
+        interaction.followup.send.assert_called_once()
+        followup_msg = interaction.followup.send.call_args[0][0]
+        assert len(followup_msg) <= 2000
+
+
+

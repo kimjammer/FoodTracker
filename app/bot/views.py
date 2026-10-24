@@ -20,7 +20,7 @@ class _BaseKitchenView(ui.View):
 
     async def on_error(self, interaction: discord.Interaction, error: Exception, item: ui.Item[Any]) -> None:
         logger.error(f"Error in Discord UI View ({self.__class__.__name__}): {error}", exc_info=True)
-        err_msg = f"❌ An error occurred while processing this action: {error}"
+        err_msg = f"❌ An error occurred while processing this action: {str(error)[:1800]}"
         try:
             if interaction.response.is_done():
                 await interaction.followup.send(err_msg, ephemeral=True)
@@ -58,9 +58,9 @@ class ReceiptConfirmationView(_BaseKitchenView):
                 interaction.message.embeds[0] if interaction.message.embeds else discord.Embed(title="Receipt Intake")
             )
             embed.color = discord.Color.red()
-            embed.set_footer(text=f"❌ Error adding items to Grocy: {e}")
+            embed.set_footer(text=f"❌ Error adding items to Grocy: {str(e)[:200]}")
             await interaction.message.edit(embed=embed, view=self)
-            await interaction.followup.send(f"❌ Error adding items to Grocy: {e}", ephemeral=True)
+            await interaction.followup.send(f"❌ Error adding items to Grocy: {str(e)[:1800]}", ephemeral=True)
             return
 
         success_count = sum(1 for r in results if r.get("status") == "success")
@@ -73,14 +73,19 @@ class ReceiptConfirmationView(_BaseKitchenView):
             embed.set_footer(
                 text=f"⚠️ Added {success_count}/{len(self.items)} items to Grocy ({len(failed_items)} failed)."
             )
-            err_lines = [f"• **{r.get('name', 'Item')}**: {r.get('detail', 'Error')}" for r in failed_items[:5]]
+            err_lines = [
+                f"• **{r.get('name', 'Item')}**: {str(r.get('detail', 'Error'))[:300]}" for r in failed_items[:5]
+            ]
             if len(failed_items) > 5:
                 err_lines.append(f"• *(and {len(failed_items) - 5} more errors...)*")
             embed.add_field(name="⚠️ Errors", value="\n".join(err_lines)[:1024], inline=False)
             await interaction.message.edit(embed=embed, view=self)
-            await interaction.followup.send(
+            followup_text = (
                 f"⚠️ Logged **{success_count}/{len(self.items)} items** into Grocy, "
-                f"but **{len(failed_items)} item(s) encountered errors**:\n" + "\n".join(err_lines),
+                f"but **{len(failed_items)} item(s) encountered errors**:\n" + "\n".join(err_lines)
+            )
+            await interaction.followup.send(
+                followup_text[:1950],
                 ephemeral=True,
             )
         else:
@@ -123,9 +128,11 @@ class MealPlanApprovalView(_BaseKitchenView):
         self.stop()
 
         # Populate missing ingredients for planned meals on Grocy shopping list
+        from datetime import date
+
         shopping_error = None
         try:
-            res = await execute_tool("meal_plan_shopping_tool", {})
+            res = await execute_tool("meal_plan_shopping_tool", {"start_date": date.today().isoformat()})
             if is_tool_error_output(res):
                 shopping_error = res
         except Exception as e:
@@ -143,7 +150,8 @@ class MealPlanApprovalView(_BaseKitchenView):
             )
             await interaction.message.edit(embed=embed, view=self)
             await interaction.followup.send(
-                f"⚠️ Plan marked as approved, but an error occurred while updating the shopping list: {shopping_error}",
+                "⚠️ Plan marked as approved, but an error occurred while updating the shopping list: "
+                f"{shopping_error[:1800]}",
                 ephemeral=True,
             )
         else:
@@ -200,7 +208,8 @@ class DailyCookView(_BaseKitchenView):
             embed.set_footer(text=f"⚠️ Marked cooked, but stock deduction failed: {consume_error[:200]}")
             await interaction.message.edit(embed=embed, view=self)
             await interaction.followup.send(
-                f"⚠️ Logged **{self.dish_name}** as cooked, but encountered an error deducting stock: {consume_error}",
+                f"⚠️ Logged **{self.dish_name}** as cooked, "
+                f"but encountered an error deducting stock: {consume_error[:1800]}",
                 ephemeral=True,
             )
         else:
@@ -238,7 +247,7 @@ class DailyCookView(_BaseKitchenView):
             alternative_text = await gemini_kitchen_agent.run_agent_loop(prompt)
             new_embed = discord.Embed(
                 title="🔄 Dinner Alternative for Tonight",
-                description=alternative_text,
+                description=alternative_text[:4000],
                 color=discord.Color.blue(),
             )
             new_embed.set_footer(text="Proposed based on current Grocy stock.")
@@ -247,4 +256,4 @@ class DailyCookView(_BaseKitchenView):
             await interaction.followup.send(embed=new_embed, view=new_view)
         except Exception as e:
             logger.error(f"Error swapping dinner: {e}", exc_info=True)
-            await interaction.followup.send(f"❌ Error generating dinner alternative: {e}", ephemeral=True)
+            await interaction.followup.send(f"❌ Error generating dinner alternative: {str(e)[:1800]}", ephemeral=True)

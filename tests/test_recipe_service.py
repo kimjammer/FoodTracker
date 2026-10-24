@@ -269,3 +269,133 @@ async def test_add_stock_reuses_existing_alternate_name_product():
         assert not prod_create_route.called
         assert stock_add_route.called
 
+
+@pytest.mark.asyncio
+async def test_meal_plan_shopping_sends_json_content_type():
+    service = RecipeService(grocy_url="http://mock-grocy", grocy_api_key="mock-key")
+
+    with respx.mock(base_url="http://mock-grocy") as respx_mock:
+        respx_mock.get("/api/objects/meal_plan").respond(
+            200,
+            json=[
+                {"id": 1, "day": "2026-10-26", "recipe_id": 10},
+                {"id": 2, "day": "2026-10-27", "recipe_id": 11},
+            ],
+        )
+        respx_mock.get("/api/objects/recipes").respond(
+            200,
+            json=[
+                {"id": 10, "name": "Kimchi Stew"},
+                {"id": 11, "name": "Beef Bulgogi"},
+            ],
+        )
+        route_10 = respx_mock.post("/api/recipes/10/add-not-fulfilled-products-to-shoppinglist").respond(204)
+        route_11 = respx_mock.post("/api/recipes/11/add-not-fulfilled-products-to-shoppinglist").respond(204)
+
+        out = await service.meal_plan_shopping(start_date="2026-10-26", end_date="2026-10-27")
+
+        assert "Added missing ingredients for 2 recipe(s)" in out
+        assert "Kimchi Stew" in out
+        assert "Beef Bulgogi" in out
+        assert route_10.called
+        assert route_11.called
+        assert "application/json" in route_10.calls.last.request.headers.get("content-type", "")
+        assert route_10.calls.last.request.read().decode() == "{}"
+
+
+@pytest.mark.asyncio
+async def test_add_recipe_to_shopping_list_sends_json_content_type():
+    service = RecipeService(grocy_url="http://mock-grocy", grocy_api_key="mock-key")
+
+    with respx.mock(base_url="http://mock-grocy") as respx_mock:
+        respx_mock.get("/api/objects/recipes").respond(
+            200,
+            json=[{"id": 10, "name": "Kimchi Stew"}],
+        )
+        route = respx_mock.post("/api/recipes/10/add-not-fulfilled-products-to-shoppinglist").respond(204)
+
+        res = await service.add_recipe_to_shopping_list("Kimchi Stew")
+
+        assert res["recipe_id"] == 10
+        assert res["recipe_name"] == "Kimchi Stew"
+        assert route.called
+        assert "application/json" in route.calls.last.request.headers.get("content-type", "")
+        assert route.calls.last.request.read().decode() == "{}"
+
+
+@pytest.mark.asyncio
+async def test_create_or_update_recipe_uses_product_qu_id_stock_in_recipes_pos():
+    import json
+
+    service = RecipeService(grocy_url="http://mock-grocy", grocy_api_key="mock-key")
+
+    with respx.mock(base_url="http://mock-grocy") as respx_mock:
+        respx_mock.get("/api/objects/locations").respond(
+            200, json=[{"id": 2, "name": "Fridge"}, {"id": 3, "name": "Freezer"}, {"id": 4, "name": "Pantry"}]
+        )
+        respx_mock.get("/api/objects/quantity_units").respond(
+            200, json=[{"id": 2, "name": "Piece"}, {"id": 3, "name": "Pack"}, {"id": 4, "name": "Bottle"}]
+        )
+        respx_mock.get("/api/objects/recipes").respond(200, json=[])
+        respx_mock.post("/api/objects/recipes").respond(200, json={"created_object_id": "50"})
+        # Existing product 150 has qu_id_stock = 3 (Pack)
+        respx_mock.get("/api/objects/products").respond(
+            200,
+            json=[
+                {
+                    "id": 150,
+                    "name": "Wagyu Bulgogi (와규불고기)",
+                    "location_id": 3,
+                    "qu_id_stock": 3,
+                    "qu_id_purchase": 3,
+                }
+            ],
+        )
+        respx_mock.get("/api/stock").respond(200, json=[{"product_id": 150, "amount": 1.0}])
+        respx_mock.post("/api/objects/products").respond(200, json={"created_object_id": "200"})
+        pos_route = respx_mock.post("/api/objects/recipes_pos").respond(200, json={"created_object_id": "301"})
+
+        await service.create_or_update_recipe(
+            name="Wagyu Bulgogi Bowl",
+            description="Quick beef bowl",
+            ingredients=[
+                {"name": "Wagyu Bulgogi (와규불고기)", "amount": 1.0, "unit": "Pack", "location": "Freezer"},
+                {"name": "Sesame Oil (참기름)", "amount": 1.0, "unit": "Bottle", "location": "Pantry"},
+            ],
+        )
+
+        assert len(pos_route.calls) == 2
+        pos_payload_1 = json.loads(pos_route.calls[0].request.read().decode())
+        pos_payload_2 = json.loads(pos_route.calls[1].request.read().decode())
+        # Matched product 150 must use qu_id=3 (Pack), and newly created Sesame Oil must use qu_id=4 (Bottle)
+        assert pos_payload_1["product_id"] == 150
+        assert pos_payload_1["qu_id"] == 3
+        assert pos_payload_2["product_id"] == 200
+        assert pos_payload_2["qu_id"] == 4
+
+
+@pytest.mark.asyncio
+async def test_meal_plan_add_replaces_existing_same_day_entries():
+    service = RecipeService(grocy_url="http://mock-grocy", grocy_api_key="mock-key")
+
+    with respx.mock(base_url="http://mock-grocy") as respx_mock:
+        respx_mock.get("/api/objects/recipes").respond(200, json=[{"id": 17, "name": "Wagyu Bulgogi Bowl"}])
+        respx_mock.get("/api/objects/meal_plan").respond(
+            200,
+            json=[
+                {"id": 8, "day": "2026-10-26", "recipe_id": 10},
+                {"id": 9, "day": "2026-10-27", "recipe_id": 11},
+            ],
+        )
+        del_route = respx_mock.delete("/api/objects/meal_plan/8").respond(204)
+        create_route = respx_mock.post("/api/objects/meal_plan").respond(200, json={"created_object_id": "15"})
+
+        out = await service.meal_plan_add(day="2026-10-26", recipe="Wagyu Bulgogi Bowl", note="Quick dinner")
+
+        assert "2026-10-26" in out
+        assert "Wagyu Bulgogi Bowl" in out
+        assert del_route.called
+        assert create_route.called
+
+
+

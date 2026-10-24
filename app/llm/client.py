@@ -249,12 +249,17 @@ class GeminiKitchenAgent:
             "1. Check current inventory and expiring stock using Grocy tools.",
             "2. Check existing recipes and past meal plans to ensure variety.",
             (
-                "3. For each day (Monday through Sunday), call `meal_plan_add_tool` to record the meal in Grocy "
+                "3. For EVERY planned dish (Monday through Sunday), call `recipe_create_by_name_tool` with the "
+                "COMPLETE `ingredients` list (including ALL key in-stock ingredients AND ALL missing ingredients "
+                "that must be purchased) so Grocy records every ingredient on the recipe."
+            ),
+            (
+                "4. For each day (Monday through Sunday), call `meal_plan_add_tool` to record the meal in Grocy "
                 "with its date (YYYY-MM-DD) and recipe name (or note)."
             ),
             (
-                "4. Call `meal_plan_shopping_tool` or `shopping_list_add_missing_tool` to queue missing ingredients "
-                "onto the shopping list."
+                f"5. Call `meal_plan_shopping_tool` (with `start_date='{start_date.isoformat()}'` and "
+                f"`end_date='{end_date.isoformat()}'`) to queue all missing recipe ingredients onto the shopping list."
             ),
         ]
         if calendar_context:

@@ -19,7 +19,7 @@ from app.scheduler.jobs import (
     run_sunday_prep_job,
 )
 from app.scheduler.schedule_manager import SCHEDULE_DEFINITIONS, ScheduleManager
-from app.scheduler.scheduler_service import SchedulerService
+from app.scheduler.scheduler_service import SchedulerService, build_cron_trigger
 from app.services.calendar_service import CalendarService
 
 
@@ -127,10 +127,26 @@ async def test_scheduler_service_lifecycle():
     service.start(mock_bot)
     assert service.scheduler.running
 
-    # Check registered jobs
+    # Check registered jobs and verify weekly job weekdays (5 = Saturday, 6 = Sunday)
     registered_ids = [job.id for job in service.scheduler.get_jobs()]
     for expected_id in SCHEDULE_DEFINITIONS:
         assert expected_id in registered_ids
+
+    from datetime import datetime, timezone
+
+    ref_now = datetime(2026, 10, 24, 16, 0, tzinfo=timezone.utc)
+    sat_job = service.scheduler.get_job("saturday_plan")
+    sun_groc_job = service.scheduler.get_job("sunday_grocery")
+    sun_prep_job = service.scheduler.get_job("sunday_prep")
+    assert sat_job is not None and sat_job.trigger.get_next_fire_time(None, ref_now).weekday() == 5
+    assert sun_groc_job is not None and sun_groc_job.trigger.get_next_fire_time(None, ref_now).weekday() == 6
+    assert sun_prep_job is not None and sun_prep_job.trigger.get_next_fire_time(None, ref_now).weekday() == 6
+
+    # Also verify standard numeric crontab strings (6=Sat, 0=Sun) map to exact same weekdays
+    sat_numeric_next = build_cron_trigger("0 14 * * 6", timezone=timezone.utc).get_next_fire_time(None, ref_now)
+    sun_numeric_next = build_cron_trigger("0 9 * * 0", timezone=timezone.utc).get_next_fire_time(None, ref_now)
+    assert sat_numeric_next is not None and sat_numeric_next.weekday() == 5
+    assert sun_numeric_next is not None and sun_numeric_next.weekday() == 6
 
     # Sync job state
     service.sync_job_state("saturday_plan")

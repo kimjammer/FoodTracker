@@ -364,3 +364,27 @@ async def test_run_agent_loop_indicates_unresolved_tool_error(monkeypatch):
     assert "⚠️" in reply
     assert "Error executing stock_consume_tool" in reply
 
+
+@pytest.mark.asyncio
+async def test_execute_meal_plan_shopping_and_recipe_shopping_tools(monkeypatch):
+    import app.llm.tools as tools_module
+
+    mock_meal_shop = AsyncMock(
+        return_value="Added missing ingredients for 1 recipe(s) to shopping list:\n  — Kimchi Stew"
+    )
+    mock_rec_shop = AsyncMock(return_value={"recipe_id": 10, "recipe_name": "Kimchi Stew"})
+    monkeypatch.setattr(tools_module.recipe_service, "meal_plan_shopping", mock_meal_shop)
+    monkeypatch.setattr(tools_module.recipe_service, "add_recipe_to_shopping_list", mock_rec_shop)
+
+    res1 = await tools_module.execute_tool(
+        "meal_plan_shopping_tool",
+        {"start_date": "2026-10-26", "end_date": "2026-11-01"},
+    )
+    assert "Kimchi Stew" in res1
+    mock_meal_shop.assert_called_once_with(start_date="2026-10-26", end_date="2026-11-01")
+
+    res2 = await tools_module.execute_tool("recipe_add_to_shopping_tool", {"recipe": "Kimchi Stew"})
+    assert "Missing ingredients for recipe 'Kimchi Stew' added to shopping list." in res2
+    mock_rec_shop.assert_called_once_with("Kimchi Stew")
+
+

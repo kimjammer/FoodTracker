@@ -189,6 +189,29 @@ class RecipeService:
                 return r
         return None
 
+    def resolve_recipe_entry(
+        self, recipes: List[Dict[str, Any]], recipe_identifier: str
+    ) -> Optional[Dict[str, Any]]:
+        """Resolve a recipe by numeric ID, normalized name, or substring match."""
+        cand_clean = (recipe_identifier or "").strip()
+        if not cand_clean:
+            return None
+        if cand_clean.isdigit():
+            target_id = int(cand_clean)
+            for r in recipes:
+                if int(r.get("id", -1)) == target_id:
+                    return r
+
+        exact = self.find_existing_recipe(recipes, cand_clean)
+        if exact:
+            return exact
+
+        cand_lower = cand_clean.lower()
+        for r in recipes:
+            if cand_lower in r.get("name", "").lower():
+                return r
+        return None
+
     @classmethod
     def normalize_ingredient_list(cls, ingredients: Any) -> List[Dict[str, Any]]:
         """
@@ -343,17 +366,23 @@ class RecipeService:
                     product_id = int(matched_prod["id"])
                     prod_display_name = matched_prod["name"]
                     location_id = int(matched_prod.get("location_id", default_pantry_id))
+                    prod_qu_id = int(
+                        matched_prod.get("qu_id_stock")
+                        or matched_prod.get("qu_id_purchase")
+                        or default_qu_id
+                    )
                 else:
-                    # Resolve location ID from LLM's classification
+                    # Resolve location ID and quantity unit ID from LLM's classification
                     location_id = location_map.get(loc_preference, default_pantry_id)
+                    prod_qu_id = self._resolve_qu_id(qu_map, unit)
 
                     create_prod_res = await client.post(
                         "/api/objects/products",
                         json={
                             "name": ing_name,
                             "location_id": location_id,
-                            "qu_id_purchase": default_qu_id,
-                            "qu_id_stock": default_qu_id,
+                            "qu_id_purchase": prod_qu_id,
+                            "qu_id_stock": prod_qu_id,
                             "min_stock_amount": 0,
                         },
                     )
@@ -368,20 +397,23 @@ class RecipeService:
                             "id": product_id,
                             "name": ing_name,
                             "location_id": location_id,
+                            "qu_id_stock": prod_qu_id,
+                            "qu_id_purchase": prod_qu_id,
                         }
                     )
 
-                # Link ingredient position
-                await client.post(
+                # Link ingredient position using the product's stock quantity unit (required by Grocy trigger)
+                pos_res = await client.post(
                     "/api/objects/recipes_pos",
                     json={
                         "recipe_id": recipe_id,
                         "product_id": product_id,
                         "amount": amount,
-                        "qu_id": default_qu_id,
+                        "qu_id": prod_qu_id,
                         "note": unit or None,
                     },
                 )
+                pos_res.raise_for_status()
 
                 # Check current stock
                 is_in_stock = product_id in current_stock_ids
@@ -459,19 +491,25 @@ class RecipeService:
             product_id = int(matched_prod["id"])
             prod_display_name = matched_prod["name"]
             location_id = int(matched_prod.get("location_id", default_pantry_id))
+            prod_qu_id = int(
+                matched_prod.get("qu_id_stock")
+                or matched_prod.get("qu_id_purchase")
+                or qu_id
+            )
             auto_created = False
         else:
             clean_name = product_name.strip()
             loc_preference = (location or "Pantry").strip().lower()
             location_id = location_map.get(loc_preference, default_pantry_id)
+            prod_qu_id = qu_id
 
             create_res = await client.post(
                 "/api/objects/products",
                 json={
                     "name": clean_name,
                     "location_id": location_id,
-                    "qu_id_purchase": qu_id,
-                    "qu_id_stock": qu_id,
+                    "qu_id_purchase": prod_qu_id,
+                    "qu_id_stock": prod_qu_id,
                     "min_stock_amount": 0,
                 },
             )
@@ -485,6 +523,8 @@ class RecipeService:
                     "id": product_id,
                     "name": clean_name,
                     "location_id": location_id,
+                    "qu_id_stock": prod_qu_id,
+                    "qu_id_purchase": prod_qu_id,
                 }
             )
 
@@ -494,6 +534,7 @@ class RecipeService:
             "product_name": prod_display_name,
             "location_id": location_id,
             "location": loc_label,
+            "qu_id_stock": prod_qu_id,
             "auto_created": auto_created,
         }
 
@@ -627,18 +668,20 @@ class RecipeService:
             )
             product_id = prod_info["product_id"]
             prod_display_name = prod_info["product_name"]
+            prod_qu_id = int(prod_info.get("qu_id_stock", default_qu_id))
             auto_created = prod_info["auto_created"]
 
-            await client.post(
+            pos_res = await client.post(
                 "/api/objects/recipes_pos",
                 json={
                     "recipe_id": recipe_id,
                     "product_id": product_id,
                     "amount": amount,
-                    "qu_id": default_qu_id,
+                    "qu_id": prod_qu_id,
                     "note": note or None,
                 },
             )
+            pos_res.raise_for_status()
 
             return {
                 "recipe_id": recipe_id,
@@ -647,6 +690,141 @@ class RecipeService:
                 "amount": amount,
                 "auto_created": auto_created,
             }
+
+    async def add_recipe_to_shopping_list(
+        self,
+        recipe_identifier: str,
+        excluded_product_ids: Optional[List[int]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Add unfulfilled ingredients for a recipe to the Grocy shopping list.
+        Explicitly sends a JSON body and Content-Type: application/json header required by Grocy.
+        """
+        if not recipe_identifier or not str(recipe_identifier).strip():
+            raise ValueError("Recipe name or ID is required.")
+
+        async with httpx.AsyncClient(base_url=self.grocy_url, headers=self._get_headers(), timeout=15.0) as client:
+            recipes_res = await client.get("/api/objects/recipes")
+            recipes = recipes_res.json() if recipes_res.status_code == 200 else []
+            matched = self.resolve_recipe_entry(recipes, str(recipe_identifier))
+
+            if matched:
+                recipe_id = int(matched["id"])
+                recipe_name = matched.get("name", f"Recipe {recipe_id}")
+            elif str(recipe_identifier).strip().isdigit():
+                recipe_id = int(str(recipe_identifier).strip())
+                recipe_name = f"Recipe {recipe_id}"
+            else:
+                raise ValueError(f"Recipe '{recipe_identifier}' not found in Grocy.")
+
+            payload: Dict[str, Any] = {}
+            if excluded_product_ids is not None:
+                payload["excludedProductIds"] = excluded_product_ids
+
+            resp = await client.post(
+                f"/api/recipes/{recipe_id}/add-not-fulfilled-products-to-shoppinglist",
+                json=payload,
+            )
+            resp.raise_for_status()
+
+            return {
+                "recipe_id": recipe_id,
+                "recipe_name": recipe_name,
+            }
+
+    async def meal_plan_shopping(
+        self,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ) -> str:
+        """
+        Add missing ingredients for all planned recipes (optionally filtered by date range)
+        to the Grocy shopping list.
+        """
+        async with httpx.AsyncClient(base_url=self.grocy_url, headers=self._get_headers(), timeout=20.0) as client:
+            entries_res = await client.get("/api/objects/meal_plan")
+            entries_res.raise_for_status()
+            entries = entries_res.json()
+            if not entries:
+                return "No meal plan entries found."
+
+            if start_date:
+                entries = [entry for entry in entries if str(entry.get("day", "")) >= start_date]
+            if end_date:
+                entries = [entry for entry in entries if str(entry.get("day", "")) <= end_date]
+
+            recipe_ids = sorted({int(entry["recipe_id"]) for entry in entries if entry.get("recipe_id")})
+            if not recipe_ids:
+                return "No recipes found in the selected meal plan entries."
+
+            recipes_res = await client.get("/api/objects/recipes")
+            recipes = recipes_res.json() if recipes_res.status_code == 200 else []
+            recipe_map = {int(r["id"]): r.get("name", f"Recipe {r['id']}") for r in recipes if "id" in r}
+
+            added: List[str] = []
+            for recipe_id in recipe_ids:
+                resp = await client.post(
+                    f"/api/recipes/{recipe_id}/add-not-fulfilled-products-to-shoppinglist",
+                    json={},
+                )
+                resp.raise_for_status()
+                added.append(recipe_map.get(recipe_id, f"Recipe {recipe_id}"))
+
+            lines = [f"Added missing ingredients for {len(added)} recipe(s) to shopping list:"]
+            for name in added:
+                lines.append(f"  — {name}")
+            return "\n".join(lines)
+
+    async def meal_plan_add(
+        self,
+        day: str,
+        recipe: Optional[str] = None,
+        note: str = "",
+        meal_type: str = "",
+    ) -> str:
+        """
+        Add or replace an entry in the Grocy meal plan for the specified day (YYYY-MM-DD).
+        Removes any existing entries for that day to prevent duplicate meals on the same date.
+        """
+        clean_day = (day or "").strip()
+        if not clean_day:
+            raise ValueError("Date 'day' (YYYY-MM-DD) is required.")
+
+        async with httpx.AsyncClient(base_url=self.grocy_url, headers=self._get_headers(), timeout=15.0) as client:
+            data: Dict[str, Any] = {"day": clean_day}
+            resolved_name = recipe
+
+            if recipe is not None and str(recipe).strip():
+                recipes_res = await client.get("/api/objects/recipes")
+                recipes = recipes_res.json() if recipes_res.status_code == 200 else []
+                matched = self.resolve_recipe_entry(recipes, str(recipe).strip())
+                if not matched:
+                    raise ValueError(
+                        f"Recipe '{recipe}' not found in Grocy. "
+                        "Create it first with recipe_create_by_name_tool including all its ingredients."
+                    )
+                data["recipe_id"] = int(matched["id"])
+                resolved_name = matched.get("name", str(recipe).strip())
+                data["type"] = meal_type or "recipe"
+            else:
+                data["type"] = meal_type or "note"
+
+            if note:
+                data["note"] = note
+
+            # Remove existing meal plan entries on the same day so re-planning replaces cleanly
+            existing_res = await client.get("/api/objects/meal_plan")
+            if existing_res.status_code == 200:
+                for entry in existing_res.json():
+                    if str(entry.get("day", "")) == clean_day and "id" in entry:
+                        await client.delete(f"/api/objects/meal_plan/{entry['id']}")
+
+            create_res = await client.post("/api/objects/meal_plan", json=data)
+            create_res.raise_for_status()
+            entry_id = create_res.json().get("created_object_id")
+
+            label = f"recipe '{resolved_name}'" if recipe else f"note '{note}'"
+            return f"Meal plan entry added for {clean_day}: {label} (ID {entry_id})."
 
 
 recipe_service = RecipeService()

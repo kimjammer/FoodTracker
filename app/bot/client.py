@@ -42,7 +42,7 @@ class KitchenBot(commands.Bot):
         error: app_commands.AppCommandError,
     ) -> None:
         logger.error(f"Unhandled slash command error: {error}", exc_info=True)
-        err_msg = f"❌ An error occurred while responding: {error}"
+        err_msg = f"❌ An error occurred while responding: {str(error)[:1800]}"
         try:
             if interaction.response.is_done():
                 await interaction.followup.send(err_msg, ephemeral=True)
@@ -157,7 +157,7 @@ class KitchenBot(commands.Bot):
 
                 embed = discord.Embed(
                     title="🥗 Proposed 7-Day Meal Plan",
-                    description=plan_text,
+                    description=plan_text[:4000],
                     color=discord.Color.green(),
                 )
                 embed.set_footer(text="Review and click 'Approve Plan' or reply to modify.")
@@ -167,7 +167,7 @@ class KitchenBot(commands.Bot):
 
             except Exception as e:
                 logger.error(f"Error generating meal plan: {e}", exc_info=True)
-                await interaction.followup.send(f"❌ Failed to generate meal plan: {e}")
+                await interaction.followup.send(f"❌ Failed to generate meal plan: {str(e)[:1800]}")
 
         @self.tree.command(name="inventory", description="View current Grocy stock overview")
         @app_commands.describe(search="Optional search query to filter products")
@@ -182,7 +182,7 @@ class KitchenBot(commands.Bot):
                     title = "📦 Kitchen Stock Overview"
 
                 if is_tool_error_output(output):
-                    await interaction.followup.send(f"❌ Error fetching stock: {output}")
+                    await interaction.followup.send(f"❌ Error fetching stock: {output[:1800]}")
                     return
 
                 embed = discord.Embed(
@@ -192,7 +192,7 @@ class KitchenBot(commands.Bot):
                 )
                 await interaction.followup.send(embed=embed)
             except Exception as e:
-                await interaction.followup.send(f"❌ Error fetching stock: {e}")
+                await interaction.followup.send(f"❌ Error fetching stock: {str(e)[:1800]}")
 
         @self.tree.command(name="shopping", description="View current Grocy shopping list")
         async def shopping_command(interaction: discord.Interaction):
@@ -200,7 +200,7 @@ class KitchenBot(commands.Bot):
             try:
                 output = await execute_tool("shopping_list_view_tool", {})
                 if is_tool_error_output(output):
-                    await interaction.followup.send(f"❌ Error fetching shopping list: {output}")
+                    await interaction.followup.send(f"❌ Error fetching shopping list: {output[:1800]}")
                     return
                 embed = discord.Embed(
                     title="🛒 Grocy Shopping List",
@@ -209,7 +209,7 @@ class KitchenBot(commands.Bot):
                 )
                 await interaction.followup.send(embed=embed)
             except Exception as e:
-                await interaction.followup.send(f"❌ Error fetching shopping list: {e}")
+                await interaction.followup.send(f"❌ Error fetching shopping list: {str(e)[:1800]}")
 
         @self.tree.command(name="cook", description="Get 4-step assembly instructions for dinner")
         @app_commands.describe(dish="Specific dish name (defaults to tonight's scheduled recipe)")
@@ -219,13 +219,13 @@ class KitchenBot(commands.Bot):
                 instructions = await gemini_kitchen_agent.generate_evening_dispatch(dish_name=dish)
                 embed = discord.Embed(
                     title=f"🍳 Tonight's Dinner Guide: {dish or 'Scheduled Dinner'}",
-                    description=instructions,
+                    description=instructions[:4000],
                     color=discord.Color.gold(),
                 )
                 view = DailyCookView(dish_name=dish or "Tonight's Dinner")
                 await interaction.followup.send(embed=embed, view=view)
             except Exception as e:
-                await interaction.followup.send(f"❌ Error generating cooking guide: {e}")
+                await interaction.followup.send(f"❌ Error generating cooking guide: {str(e)[:1800]}")
 
         @self.tree.command(name="status", description="Check system connectivity (Grocy, Gemini & Google Calendar)")
         async def status_command(interaction: discord.Interaction):
@@ -234,11 +234,11 @@ class KitchenBot(commands.Bot):
             try:
                 sys_res = await execute_tool("system_info_tool", {})
                 if is_tool_error_output(sys_res):
-                    grocy_status = f"❌ Grocy connection error: {sys_res}"
+                    grocy_status = f"❌ Grocy connection error: {sys_res[:900]}"
                 else:
                     grocy_status = "✅ Connected to Grocy"
             except Exception as e:
-                grocy_status = f"❌ Grocy connection error: {e}"
+                grocy_status = f"❌ Grocy connection error: {str(e)[:900]}"
 
             # Check Gemini API Key
             gemini_status = (
@@ -310,7 +310,7 @@ class KitchenBot(commands.Bot):
                     )
             except Exception as e:
                 logger.error(f"Error triggering routine {routine}: {e}", exc_info=True)
-                await interaction.followup.send(f"❌ Error triggering {meta.name}: {e}", ephemeral=True)
+                await interaction.followup.send(f"❌ Error triggering {meta.name}: {str(e)[:1800]}", ephemeral=True)
 
         @self.tree.command(name="profile", description="View or update your persistent culinary profile")
         @app_commands.describe(text="Optional new profile text to save. Leave blank to view current profile.")

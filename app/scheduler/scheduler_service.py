@@ -17,6 +17,40 @@ from config import settings
 
 logger = logging.getLogger(__name__)
 
+_CRONTAB_DOW_MAP = {
+    "0": "sun",
+    "1": "mon",
+    "2": "tue",
+    "3": "wed",
+    "4": "thu",
+    "5": "fri",
+    "6": "sat",
+    "7": "sun",
+}
+
+
+def build_cron_trigger(expr: str, timezone: Optional[zoneinfo.ZoneInfo] = None) -> CronTrigger:
+    """
+    Create an APScheduler CronTrigger from a standard 5-field UNIX crontab expression.
+    Normalizes numeric day-of-week values (0/7=Sun .. 6=Sat) to weekday names so
+    APScheduler 3.x does not shift numeric weekdays by +1 day (APScheduler issue #286).
+    """
+    parts = expr.split()
+    if len(parts) == 5:
+        dow_tokens = parts[4].split(",")
+        normalized_tokens = []
+        for token in dow_tokens:
+            if "-" in token:
+                start, end = token.split("-", 1)
+                normalized_tokens.append(
+                    f"{_CRONTAB_DOW_MAP.get(start, start)}-{_CRONTAB_DOW_MAP.get(end, end)}"
+                )
+            else:
+                normalized_tokens.append(_CRONTAB_DOW_MAP.get(token, token))
+        parts[4] = ",".join(normalized_tokens)
+        expr = " ".join(parts)
+    return CronTrigger.from_crontab(expr, timezone=timezone)
+
 
 class SchedulerService:
     """
@@ -59,7 +93,7 @@ class SchedulerService:
                 if self._bot:
                     await r(self._bot)
 
-            trigger = CronTrigger.from_crontab(meta.cron, timezone=tz)
+            trigger = build_cron_trigger(meta.cron, timezone=tz)
             job = self.scheduler.add_job(
                 make_job_wrapper,
                 trigger=trigger,

@@ -214,7 +214,8 @@ STOCK_ADD_DECLARATION = types.FunctionDeclaration(
     description=(
         "Add stock for a product in Grocy (e.g. after a purchase or restocking). "
         "Automatically checks if the product (or an alternate/bilingual name for it) already exists in Grocy, "
-        "and creates the product with the specified storage location and unit before adding stock if it does not yet exist."
+        "and creates the product with the specified storage location and unit before adding stock "
+        "if it does not yet exist."
     ),
     parameters={
         "type": "OBJECT",
@@ -236,7 +237,9 @@ STOCK_ADD_DECLARATION = types.FunctionDeclaration(
             },
             "location": {
                 "type": "STRING",
-                "description": "Appropriate storage location if creating the product: 'Fridge', 'Pantry', or 'Freezer'.",
+                "description": (
+                    "Appropriate storage location if creating the product: 'Fridge', 'Pantry', or 'Freezer'."
+                ),
             },
             "alternate_names": {
                 "type": "ARRAY",
@@ -278,7 +281,9 @@ STOCK_INVENTORY_DECLARATION = types.FunctionDeclaration(
             },
             "location": {
                 "type": "STRING",
-                "description": "Appropriate storage location if creating the product: 'Fridge', 'Pantry', or 'Freezer'.",
+                "description": (
+                    "Appropriate storage location if creating the product: 'Fridge', 'Pantry', or 'Freezer'."
+                ),
             },
             "alternate_names": {
                 "type": "ARRAY",
@@ -499,6 +504,43 @@ async def execute_tool(name: str, arguments: Dict[str, Any]) -> str:
         except Exception as e:
             logger.error(f"Failed to add ingredient to recipe: {e}", exc_info=True)
             return f"Error adding ingredient to recipe: {e}"
+
+    if name == "recipe_add_to_shopping_tool":
+        recipe_id_or_name = str(arguments.get("recipe", "")).strip()
+        try:
+            res = await recipe_service.add_recipe_to_shopping_list(recipe_id_or_name)
+            return f"Missing ingredients for recipe '{res['recipe_name']}' added to shopping list."
+        except Exception as e:
+            logger.error(f"Failed to add recipe '{recipe_id_or_name}' to shopping list: {e}", exc_info=True)
+            return f"Error adding recipe '{recipe_id_or_name}' to shopping list: {e}"
+
+    if name == "meal_plan_add_tool":
+        day = str(arguments.get("day", "")).strip()
+        recipe = arguments.get("recipe")
+        note = str(arguments.get("note") or "").strip()
+        meal_type = str(arguments.get("meal_type") or "").strip()
+        try:
+            return await recipe_service.meal_plan_add(
+                day=day,
+                recipe=str(recipe).strip() if recipe else None,
+                note=note,
+                meal_type=meal_type,
+            )
+        except Exception as e:
+            logger.error(f"Failed to add meal plan entry for {day}: {e}", exc_info=True)
+            return f"Error adding meal plan entry for {day}: {e}"
+
+    if name == "meal_plan_shopping_tool":
+        start_date = arguments.get("start_date")
+        end_date = arguments.get("end_date")
+        try:
+            return await recipe_service.meal_plan_shopping(
+                start_date=str(start_date).strip() if start_date else None,
+                end_date=str(end_date).strip() if end_date else None,
+            )
+        except Exception as e:
+            logger.error(f"Failed to add meal plan recipes to shopping list: {e}", exc_info=True)
+            return f"Error adding meal plan ingredients to shopping list: {e}"
 
     result = await grocy_mcp_service.call_tool(name, arguments)
     is_error = bool(getattr(result, "isError", False) or getattr(result, "is_error", False))

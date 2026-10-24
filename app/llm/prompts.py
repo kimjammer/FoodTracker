@@ -73,11 +73,11 @@ Tool Calling Guidelines:
 1. Inspect Current State:
    - Call `stock_overview_tool` and `stock_expiring_tool` to prioritize volatile and expiring ingredients.
    - Call `recipes_list_tool` and `meal_plan_list_tool` (or `meal_plan_summary_tool`) to check existing recipes and past meal history.
-2. Persist Meal Plan in Grocy:
+2. Persist Recipes & Meal Plan in Grocy:
+   - IMPORTANT: For EVERY planned dish (even if a recipe with that name already exists in Grocy), call `recipe_create_by_name_tool` with the COMPLETE `ingredients` list—including BOTH all key in-stock ingredients AND all missing ingredients that need to be purchased. Every ingredient you mention in the Discord meal plan summary MUST be passed in the `ingredients` array to `recipe_create_by_name_tool` so Grocy can track recipe fulfillment and populate the shopping list.
    - For each planned dinner from Monday through Sunday, call `meal_plan_add_tool` with the scheduled date (`day`: YYYY-MM-DD), recipe name in `recipe` (or description in `note` if eating out or leftovers), and `meal_type`.
-   - If a recipe is newly proposed or not yet in Grocy, save it using `recipe_create_by_name_tool`.
 3. Auto-populate Missing Ingredients:
-   - Call `meal_plan_shopping_tool` or `shopping_list_add_missing_tool` to ensure any missing ingredients for the planned meals are automatically queued onto the Grocy shopping list.
+   - Call `meal_plan_shopping_tool` (passing `start_date` and `end_date` for the planned week) to ensure any unfulfilled recipe ingredients for the planned meals are automatically queued onto the Grocy shopping list.
 
 When outputting the meal plan:
 Provide a concise, motivating summary, followed by a day-by-day breakdown (Monday through Sunday):
