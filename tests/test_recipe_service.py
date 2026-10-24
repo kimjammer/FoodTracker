@@ -186,3 +186,86 @@ async def test_create_or_update_recipe_updates_existing_without_duplicate():
         assert result["recipe_id"] == 10
         assert len(result["ingredients"]) == 1
         assert result["ingredients"][0]["amount"] == 2.0
+
+
+def test_find_existing_product_alternate_and_bilingual_names():
+    products = [
+        {"id": 1, "name": "Green Onions", "location_id": 2},
+        {"id": 2, "name": "Red Pepper Flakes (고춧가루)", "location_id": 4},
+        {"id": 3, "name": "Eggs", "location_id": 2},
+    ]
+
+    # Match via explicit alternate_names
+    found = recipe_service.find_existing_product(products, "Scallions", alternate_names=["Green Onion", "대파"])
+    assert found is not None and found["id"] == 1
+
+    # Match when candidate has bilingual parenthetical sharing the Korean name with existing product
+    found = recipe_service.find_existing_product(products, "Gochugaru (고춧가루)")
+    assert found is not None and found["id"] == 2
+
+    # Singular vs plural match
+    found = recipe_service.find_existing_product(products, "Egg")
+    assert found is not None and found["id"] == 3
+
+
+@pytest.mark.asyncio
+async def test_add_stock_creates_missing_product_before_adding():
+    service = RecipeService(grocy_url="http://mock-grocy", grocy_api_key="mock-key")
+
+    with respx.mock(base_url="http://mock-grocy") as respx_mock:
+        respx_mock.get("/api/objects/locations").respond(
+            200, json=[{"id": 2, "name": "Fridge"}, {"id": 3, "name": "Freezer"}, {"id": 4, "name": "Pantry"}]
+        )
+        respx_mock.get("/api/objects/quantity_units").respond(
+            200, json=[{"id": 2, "name": "Piece"}, {"id": 5, "name": "Bottle"}]
+        )
+        respx_mock.get("/api/objects/products").respond(200, json=[])
+        prod_create_route = respx_mock.post("/api/objects/products").respond(200, json={"created_object_id": "77"})
+        stock_add_route = respx_mock.post("/api/stock/products/77/add").respond(200, json=[{"id": 1}])
+
+        res = await service.add_stock(
+            product_name="Mirin (みりん)",
+            amount=1.0,
+            unit="Bottle",
+            location="Pantry",
+        )
+
+        assert res["auto_created"] is True
+        assert res["product_id"] == 77
+        assert res["product_name"] == "Mirin (みりん)"
+        assert res["amount"] == 1.0
+        assert res["location"] == "Pantry"
+        assert prod_create_route.called
+        assert stock_add_route.called
+
+
+@pytest.mark.asyncio
+async def test_add_stock_reuses_existing_alternate_name_product():
+    service = RecipeService(grocy_url="http://mock-grocy", grocy_api_key="mock-key")
+
+    with respx.mock(base_url="http://mock-grocy", assert_all_called=False) as respx_mock:
+        respx_mock.get("/api/objects/locations").respond(
+            200, json=[{"id": 2, "name": "Fridge"}, {"id": 4, "name": "Pantry"}]
+        )
+        respx_mock.get("/api/objects/quantity_units").respond(200, json=[{"id": 2, "name": "Piece"}])
+        respx_mock.get("/api/objects/products").respond(
+            200, json=[{"id": 12, "name": "Tofu (두부)", "location_id": 2}]
+        )
+        prod_create_route = respx_mock.post("/api/objects/products").respond(200, json={"created_object_id": "99"})
+        stock_add_route = respx_mock.post("/api/stock/products/12/add").respond(200, json=[{"id": 1}])
+
+        # Adding stock using Korean name or alternate name should resolve to product 12 without creating a duplicate
+        res = await service.add_stock(
+            product_name="Firm Dubu",
+            amount=2.0,
+            unit="Pack",
+            location="Fridge",
+            alternate_names=["두부", "Tofu"],
+        )
+
+        assert res["auto_created"] is False
+        assert res["product_id"] == 12
+        assert res["product_name"] == "Tofu (두부)"
+        assert not prod_create_route.called
+        assert stock_add_route.called
+

@@ -13,7 +13,7 @@ from app.bot.handlers import handle_receipt_attachment, handle_user_query, is_im
 from app.bot.schedule_views import ScheduleManagementView, build_schedule_embed
 from app.bot.views import DailyCookView, MealPlanApprovalView
 from app.llm.client import gemini_kitchen_agent
-from app.llm.tools import execute_tool
+from app.llm.tools import execute_tool, is_tool_error_output
 from app.scheduler.schedule_manager import SCHEDULE_DEFINITIONS, schedule_manager
 from app.scheduler.scheduler_service import scheduler_service
 from app.services.calendar_service import calendar_service
@@ -34,6 +34,22 @@ class KitchenBot(commands.Bot):
         intents.guilds = True
 
         super().__init__(command_prefix="!", intents=intents)
+        self.tree.on_error = self.on_app_command_error
+
+    async def on_app_command_error(
+        self,
+        interaction: discord.Interaction,
+        error: app_commands.AppCommandError,
+    ) -> None:
+        logger.error(f"Unhandled slash command error: {error}", exc_info=True)
+        err_msg = f"❌ An error occurred while responding: {error}"
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(err_msg, ephemeral=True)
+            else:
+                await interaction.response.send_message(err_msg, ephemeral=True)
+        except Exception:
+            pass
 
     async def setup_hook(self):
         """Register application commands and sync command tree."""
@@ -84,20 +100,36 @@ class KitchenBot(commands.Bot):
         if not should_handle:
             return
 
-        # Check for receipt photo upload
-        if message.attachments and any(is_image_attachment(a) for a in message.attachments):
-            await handle_receipt_attachment(message)
-            return
+        try:
+            # Check for receipt photo upload
+            if message.attachments and any(is_image_attachment(a) for a in message.attachments):
+                await handle_receipt_attachment(message)
+                return
 
-        # Clean mention prefix if present
-        clean_content = message.content
-        if self.user:
-            clean_content = clean_content.replace(f"<@{self.user.id}>", "").replace(f"<@!{self.user.id}>", "")
-        clean_content = clean_content.strip()
+            # Clean mention prefix if present
+            clean_content = message.content
+            if self.user:
+                clean_content = clean_content.replace(f"<@{self.user.id}>", "").replace(f"<@!{self.user.id}>", "")
+            clean_content = clean_content.strip()
 
-        if clean_content:
-            message.content = clean_content
-            await handle_user_query(message, bot_user=self.user)
+            if clean_content:
+                message.content = clean_content
+                await handle_user_query(message, bot_user=self.user)
+        except Exception as e:
+            logger.error(f"Error in on_message handler: {e}", exc_info=True)
+            try:
+                if hasattr(message, "add_reaction"):
+                    await message.add_reaction("❌")
+            except Exception:
+                pass
+            err_text = f"❌ An error occurred while responding: {str(e)[:1500]}"
+            try:
+                await message.reply(err_text)
+            except Exception:
+                try:
+                    await message.channel.send(err_text)
+                except Exception:
+                    pass
 
     def register_slash_commands(self):
         """Define application slash commands."""
@@ -149,6 +181,10 @@ class KitchenBot(commands.Bot):
                     output = await execute_tool("stock_overview_tool", {})
                     title = "📦 Kitchen Stock Overview"
 
+                if is_tool_error_output(output):
+                    await interaction.followup.send(f"❌ Error fetching stock: {output}")
+                    return
+
                 embed = discord.Embed(
                     title=title,
                     description=output[:4000] if output else "No stock items found.",
@@ -163,6 +199,9 @@ class KitchenBot(commands.Bot):
             await interaction.response.defer()
             try:
                 output = await execute_tool("shopping_list_view_tool", {})
+                if is_tool_error_output(output):
+                    await interaction.followup.send(f"❌ Error fetching shopping list: {output}")
+                    return
                 embed = discord.Embed(
                     title="🛒 Grocy Shopping List",
                     description=output[:4000] if output else "Shopping list is empty.",
@@ -193,8 +232,11 @@ class KitchenBot(commands.Bot):
             await interaction.response.defer(ephemeral=True)
             # Check Grocy
             try:
-                await execute_tool("system_info_tool", {})
-                grocy_status = "✅ Connected to Grocy"
+                sys_res = await execute_tool("system_info_tool", {})
+                if is_tool_error_output(sys_res):
+                    grocy_status = f"❌ Grocy connection error: {sys_res}"
+                else:
+                    grocy_status = "✅ Connected to Grocy"
             except Exception as e:
                 grocy_status = f"❌ Grocy connection error: {e}"
 

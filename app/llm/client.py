@@ -21,7 +21,7 @@ from app.llm.prompts import (
     SUNDAY_PREP_PROMPT,
 )
 from app.llm.rate_limiter import rate_limiter
-from app.llm.tools import execute_tool, get_gemini_tools
+from app.llm.tools import execute_tool, get_gemini_tools, is_tool_error_output
 from app.services.profile_service import user_profile_service
 from config import settings
 
@@ -84,6 +84,7 @@ class GeminiKitchenAgent:
         )
 
         turns = 0
+        unresolved_errors: Dict[str, str] = {}
         while turns < max_turns:
             turns += 1
             # Check if Gemini requested any tool/function calls
@@ -103,6 +104,11 @@ class GeminiKitchenAgent:
                     logger.error(f"Error executing {tool_name}: {e}")
                     tool_output = f"Error executing tool {tool_name}: {e}"
 
+                if is_tool_error_output(tool_output):
+                    unresolved_errors[tool_name] = tool_output
+                else:
+                    unresolved_errors.pop(tool_name, None)
+
                 tool_responses.append(
                     types.Part.from_function_response(
                         name=tool_name,
@@ -117,7 +123,28 @@ class GeminiKitchenAgent:
                 on_rate_limit=on_rate_limit,
             )
 
-        return response.text or "I completed the request."
+        final_text = (response.text or "").strip()
+        if not final_text:
+            if unresolved_errors:
+                err_lines = "\n".join(f"• `{k}`: {v}" for k, v in unresolved_errors.items())
+                return f"⚠️ **An error occurred while processing your request:**\n{err_lines}"
+            if turns >= max_turns and getattr(response, "function_calls", None):
+                return "⚠️ **Error:** Reached the maximum number of tool execution steps before completing the response."
+            return "I completed the request."
+
+        if unresolved_errors:
+            lower_text = final_text.lower()
+            has_error_mention = any(
+                token in lower_text for token in ("error", "failed", "could not", "unable to", "not found")
+            )
+            has_error_badge = "⚠️" in final_text or "❌" in final_text
+            if not has_error_mention and not has_error_badge:
+                err_lines = "\n".join(f"• {v}" for v in unresolved_errors.values())
+                final_text = f"{final_text}\n\n⚠️ **Warning — An error occurred during execution:**\n{err_lines}"
+            elif not has_error_badge:
+                final_text = f"⚠️ {final_text}"
+
+        return final_text
 
     async def parse_grocery_image(
         self,
@@ -172,8 +199,9 @@ class GeminiKitchenAgent:
         items: List[Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
         """
-        Batch add parsed receipt items directly to Grocy inventory via Grocy MCP.
-        Runs locally against Grocy MCP (consumes 0 Gemini API rate limit).
+        Batch add parsed receipt items directly to Grocy inventory via Grocy tool bridge.
+        Automatically creates missing products with their inferred locations and units.
+        Runs locally against Grocy (consumes 0 Gemini API rate limit).
         """
         results = []
         for item in items:
@@ -181,9 +209,19 @@ class GeminiKitchenAgent:
             qty = float(item.get("quantity", 1.0))
             if not name:
                 continue
+            tool_args: Dict[str, Any] = {"product": name, "amount": qty}
+            if item.get("unit"):
+                tool_args["unit"] = item["unit"]
+            if item.get("location"):
+                tool_args["location"] = item["location"]
+            if item.get("alternate_names"):
+                tool_args["alternate_names"] = item["alternate_names"]
             try:
-                res = await execute_tool("stock_add_tool", {"product": name, "amount": qty})
-                results.append({"name": name, "quantity": qty, "status": "success", "detail": res})
+                res = await execute_tool("stock_add_tool", tool_args)
+                if is_tool_error_output(res):
+                    results.append({"name": name, "quantity": qty, "status": "error", "detail": res})
+                else:
+                    results.append({"name": name, "quantity": qty, "status": "success", "detail": res})
             except Exception as e:
                 results.append({"name": name, "quantity": qty, "status": "error", "detail": str(e)})
         return results

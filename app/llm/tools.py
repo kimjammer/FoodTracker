@@ -189,6 +189,14 @@ RECIPE_CREATE_BY_NAME_DECLARATION = types.FunctionDeclaration(
                                 "Appropriate storage location for the product: 'Fridge', 'Pantry', or 'Freezer'."
                             ),
                         },
+                        "alternate_names": {
+                            "type": "ARRAY",
+                            "items": {"type": "STRING"},
+                            "description": (
+                                "Optional alternate, regional, or translated names for the same ingredient "
+                                "(e.g. ['Green Onion', 'Scallion', '대파']) to match existing products."
+                            ),
+                        },
                     },
                     "required": ["name"],
                 },
@@ -200,6 +208,117 @@ RECIPE_CREATE_BY_NAME_DECLARATION = types.FunctionDeclaration(
         "required": ["name"],
     },
 )
+
+STOCK_ADD_DECLARATION = types.FunctionDeclaration(
+    name="stock_add_tool",
+    description=(
+        "Add stock for a product in Grocy (e.g. after a purchase or restocking). "
+        "Automatically checks if the product (or an alternate/bilingual name for it) already exists in Grocy, "
+        "and creates the product with the specified storage location and unit before adding stock if it does not yet exist."
+    ),
+    parameters={
+        "type": "OBJECT",
+        "properties": {
+            "product": {
+                "type": "STRING",
+                "description": (
+                    "Product name or numeric product ID. Use bilingual naming for international items "
+                    "(e.g. 'Milk', 'Tofu (두부)', 'Pork Belly (삼겹살)')."
+                ),
+            },
+            "amount": {
+                "type": "NUMBER",
+                "description": "Quantity to add to stock (e.g. 1.0, 2.0, 12.0).",
+            },
+            "unit": {
+                "type": "STRING",
+                "description": "Quantity unit (e.g. 'Piece', 'Pack', 'Bottle', 'g', 'kg', 'oz').",
+            },
+            "location": {
+                "type": "STRING",
+                "description": "Appropriate storage location if creating the product: 'Fridge', 'Pantry', or 'Freezer'.",
+            },
+            "alternate_names": {
+                "type": "ARRAY",
+                "items": {"type": "STRING"},
+                "description": (
+                    "Optional alternate, regional, or translated names for the same item "
+                    "(e.g. ['Green Onion', 'Scallion', '대파']) to match existing catalog items and prevent duplicates."
+                ),
+            },
+        },
+        "required": ["product", "amount"],
+    },
+)
+
+STOCK_INVENTORY_DECLARATION = types.FunctionDeclaration(
+    name="stock_inventory_tool",
+    description=(
+        "Correct or set the exact stock level for a product in Grocy by specifying an absolute quantity. "
+        "Automatically checks if the product (or an alternate/bilingual name for it) already exists in Grocy, "
+        "and creates the product before setting stock if it does not yet exist."
+    ),
+    parameters={
+        "type": "OBJECT",
+        "properties": {
+            "product": {
+                "type": "STRING",
+                "description": (
+                    "Product name or numeric product ID. Use bilingual naming for international items "
+                    "(e.g. 'Eggs', 'Tofu (두부)')."
+                ),
+            },
+            "new_amount": {
+                "type": "NUMBER",
+                "description": "The corrected total stock quantity.",
+            },
+            "unit": {
+                "type": "STRING",
+                "description": "Quantity unit (e.g. 'Piece', 'Pack', 'Bottle', 'g', 'kg', 'oz').",
+            },
+            "location": {
+                "type": "STRING",
+                "description": "Appropriate storage location if creating the product: 'Fridge', 'Pantry', or 'Freezer'.",
+            },
+            "alternate_names": {
+                "type": "ARRAY",
+                "items": {"type": "STRING"},
+                "description": (
+                    "Optional alternate, regional, or translated names for the same item "
+                    "to match existing catalog items and prevent duplicates."
+                ),
+            },
+        },
+        "required": ["product", "new_amount"],
+    },
+)
+
+CUSTOM_TOOL_DECLARATIONS = {
+    "recipe_create_by_name_tool": RECIPE_CREATE_BY_NAME_DECLARATION,
+    "stock_add_tool": STOCK_ADD_DECLARATION,
+    "stock_inventory_tool": STOCK_INVENTORY_DECLARATION,
+    "fetch_recipe_from_url_tool": FETCH_RECIPE_DECLARATION,
+    "user_profile_get_tool": USER_PROFILE_GET_DECLARATION,
+    "user_profile_update_tool": USER_PROFILE_UPDATE_DECLARATION,
+}
+
+
+def is_tool_error_output(output: str) -> bool:
+    """Detect whether a textual tool output indicates an error."""
+    if not output:
+        return False
+    stripped = output.strip()
+    lower = stripped.lower()
+    if lower.startswith(("error:", "error ", "❌")):
+        return True
+    if stripped.startswith("{") and stripped.endswith("}"):
+        try:
+            data = json.loads(stripped)
+            if isinstance(data, dict) and data.get("error"):
+                return True
+        except Exception:
+            pass
+    return False
 
 
 async def get_gemini_tools(tool_names: Optional[set[str]] = None) -> types.Tool:
@@ -214,8 +333,8 @@ async def get_gemini_tools(tool_names: Optional[set[str]] = None) -> types.Tool:
     function_declarations: List[types.FunctionDeclaration] = []
     for tool in mcp_tools:
         if tool.name in allowed_names:
-            if tool.name == "recipe_create_by_name_tool":
-                function_declarations.append(RECIPE_CREATE_BY_NAME_DECLARATION)
+            if tool.name in CUSTOM_TOOL_DECLARATIONS:
+                function_declarations.append(CUSTOM_TOOL_DECLARATIONS[tool.name])
                 continue
             parameters = _clean_schema(tool.input_schema) if tool.input_schema else None
             decl = types.FunctionDeclaration(
@@ -226,16 +345,11 @@ async def get_gemini_tools(tool_names: Optional[set[str]] = None) -> types.Tool:
             function_declarations.append(decl)
 
     # Append local custom tools if requested or using default set
-    if "fetch_recipe_from_url_tool" in allowed_names or tool_names is None:
-        function_declarations.append(FETCH_RECIPE_DECLARATION)
-    if "user_profile_get_tool" in allowed_names or tool_names is None:
-        function_declarations.append(USER_PROFILE_GET_DECLARATION)
-    if "user_profile_update_tool" in allowed_names or tool_names is None:
-        function_declarations.append(USER_PROFILE_UPDATE_DECLARATION)
-    if ("recipe_create_by_name_tool" in allowed_names or tool_names is None) and not any(
-        d.name == "recipe_create_by_name_tool" for d in function_declarations
-    ):
-        function_declarations.append(RECIPE_CREATE_BY_NAME_DECLARATION)
+    for custom_name, custom_decl in CUSTOM_TOOL_DECLARATIONS.items():
+        if (custom_name in allowed_names or tool_names is None) and not any(
+            d.name == custom_name for d in function_declarations
+        ):
+            function_declarations.append(custom_decl)
 
     return types.Tool(function_declarations=function_declarations)
 
@@ -265,6 +379,68 @@ async def execute_tool(name: str, arguments: Dict[str, Any]) -> str:
             return msg
         except ValueError as ve:
             return f"Error updating profile: {ve}"
+
+    if name == "stock_add_tool":
+        product_name = str(arguments.get("product") or arguments.get("name") or "").strip()
+        raw_amount = arguments.get("amount", arguments.get("quantity", 1.0))
+        unit = str(arguments.get("unit") or "Piece").strip()
+        location = str(arguments.get("location") or "Pantry").strip()
+        alt_raw = arguments.get("alternate_names") or arguments.get("aliases")
+        alternate_names = (
+            [str(a).strip() for a in alt_raw if str(a).strip()]
+            if isinstance(alt_raw, list)
+            else None
+        )
+        best_before_date = arguments.get("best_before_date")
+        price = arguments.get("price")
+        try:
+            amount = float(raw_amount)
+            res = await recipe_service.add_stock(
+                product_name=product_name,
+                amount=amount,
+                unit=unit,
+                location=location,
+                alternate_names=alternate_names,
+                best_before_date=best_before_date,
+                price=float(price) if price is not None else None,
+            )
+            status = "auto-created" if res["auto_created"] else "existing"
+            return (
+                f"Added {res['amount']} of '{res['product_name']}' "
+                f"({status} product ID: {res['product_id']}, location: {res['location']}) to stock."
+            )
+        except Exception as e:
+            logger.error(f"Failed to add stock for '{product_name}': {e}", exc_info=True)
+            return f"Error adding stock for '{product_name}': {e}"
+
+    if name == "stock_inventory_tool":
+        product_name = str(arguments.get("product") or arguments.get("name") or "").strip()
+        raw_new_amount = arguments.get("new_amount", arguments.get("amount", 0.0))
+        unit = str(arguments.get("unit") or "Piece").strip()
+        location = str(arguments.get("location") or "Pantry").strip()
+        alt_raw = arguments.get("alternate_names") or arguments.get("aliases")
+        alternate_names = (
+            [str(a).strip() for a in alt_raw if str(a).strip()]
+            if isinstance(alt_raw, list)
+            else None
+        )
+        try:
+            new_amount = float(raw_new_amount)
+            res = await recipe_service.inventory_stock(
+                product_name=product_name,
+                new_amount=new_amount,
+                unit=unit,
+                location=location,
+                alternate_names=alternate_names,
+            )
+            status = "auto-created" if res["auto_created"] else "existing"
+            return (
+                f"Inventory updated: '{res['product_name']}' "
+                f"({status} product ID: {res['product_id']}, location: {res['location']}) set to {res['new_amount']}."
+            )
+        except Exception as e:
+            logger.error(f"Failed to update inventory for '{product_name}': {e}", exc_info=True)
+            return f"Error updating inventory for '{product_name}': {e}"
 
     if name in ("recipe_create_by_name_tool", "recipe_create_tool"):
         recipe_name = arguments.get("name", "Untitled Recipe")
@@ -300,11 +476,20 @@ async def execute_tool(name: str, arguments: Dict[str, Any]) -> str:
         recipe_id_or_name = str(arguments.get("recipe", ""))
         product_name = str(arguments.get("product", ""))
         amount = float(arguments.get("amount", 1.0))
+        location = str(arguments.get("location") or "Pantry").strip()
+        alt_raw = arguments.get("alternate_names") or arguments.get("aliases")
+        alternate_names = (
+            [str(a).strip() for a in alt_raw if str(a).strip()]
+            if isinstance(alt_raw, list)
+            else None
+        )
         try:
             res = await recipe_service.add_ingredient_to_recipe(
                 recipe_identifier=recipe_id_or_name,
                 product_name=product_name,
                 amount=amount,
+                location=location,
+                alternate_names=alternate_names,
             )
             status = "auto-created" if res["auto_created"] else "existing"
             return (
@@ -316,7 +501,13 @@ async def execute_tool(name: str, arguments: Dict[str, Any]) -> str:
             return f"Error adding ingredient to recipe: {e}"
 
     result = await grocy_mcp_service.call_tool(name, arguments)
+    is_error = bool(getattr(result, "isError", False) or getattr(result, "is_error", False))
     if hasattr(result, "content") and result.content:
         texts = [block.text for block in result.content if hasattr(block, "text")]
-        return "\n".join(texts)
-    return str(result)
+        output_text = "\n".join(texts)
+    else:
+        output_text = str(result)
+
+    if is_error and not is_tool_error_output(output_text):
+        return f"Error executing {name}: {output_text}"
+    return output_text

@@ -1,5 +1,8 @@
 import os
+import shutil
+import sys
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from mcp import ClientSession, StdioServerParameters
@@ -31,8 +34,13 @@ class GrocyMCPService:
         env["GROCY_URL"] = self.grocy_url
         env["GROCY_API_KEY"] = self.grocy_api_key
 
+        cmd = shutil.which("grocy-mcp")
+        if not cmd:
+            venv_cmd = Path(sys.executable).parent / "grocy-mcp"
+            cmd = str(venv_cmd) if venv_cmd.exists() else "grocy-mcp"
+
         return StdioServerParameters(
-            command="grocy-mcp",
+            command=cmd,
             args=["--transport", "stdio"],
             env=env,
         )

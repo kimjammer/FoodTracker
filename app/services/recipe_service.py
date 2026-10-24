@@ -80,38 +80,103 @@ class RecipeService:
     def _normalize_name(name: str) -> str:
         """Strip spaces, punctuation, emojis for fuzzy matching."""
         s = name.lower()
-        s = re.sub(r"[\s\-_.,!?'\"()]+", "", s)
+        s = re.sub(r"[\s\-_.,!?'\"()/\\]+", "", s)
         return s
 
-    def find_existing_product(self, products: List[Dict[str, Any]], candidate_name: str) -> Optional[Dict[str, Any]]:
-        """
-        Check if candidate ingredient name matches an existing Grocy product.
-        Supports exact matches, parenthetical bilingual names, or substrings.
-        """
-        cand_clean = candidate_name.strip()
-        cand_norm = self._normalize_name(cand_clean)
-        if not cand_norm:
-            return None
+    @staticmethod
+    def _singularize(norm: str) -> str:
+        """Normalize simple English plural forms for product matching."""
+        if len(norm) <= 3:
+            return norm
+        if norm.endswith("ies") and len(norm) > 4:
+            return norm[:-3] + "y"
+        if norm.endswith(("oes", "ses", "xes", "ches", "shes")) and len(norm) > 4:
+            return norm[:-2]
+        if norm.endswith("s") and not norm.endswith("ss"):
+            return norm[:-1]
+        return norm
 
-        # 1. Exact match
-        for p in products:
-            p_name = p.get("name", "").strip()
-            if self._normalize_name(p_name) == cand_norm:
-                return p
+    @classmethod
+    def _extract_name_variants(cls, name: str, alternate_names: Optional[List[str]] = None) -> List[str]:
+        """
+        Extract normalized name variants from a product/ingredient name and optional alternate names.
+        Includes full name, base name outside parentheses, parenthetical aliases, and slash/comma splits.
+        """
+        raw_inputs: List[str] = []
+        if name and name.strip():
+            raw_inputs.append(name.strip())
+        if alternate_names:
+            for alt in alternate_names:
+                if isinstance(alt, str) and alt.strip():
+                    raw_inputs.append(alt.strip())
 
-        # 2. Match within parenthetical content (e.g. "Gochugaru (고춧가루)")
-        for p in products:
-            p_name = p.get("name", "").strip()
-            for inner in re.findall(r"\((.*?)\)", p_name):
-                if self._normalize_name(inner) == cand_norm:
+        variants: List[str] = []
+
+        def _add_variant(s: str) -> None:
+            norm = cls._normalize_name(s)
+            if norm and norm not in variants:
+                variants.append(norm)
+
+        for raw in raw_inputs:
+            _add_variant(raw)
+            # Base name outside parentheses (e.g. "Gochugaru (고춧가루)" -> "Gochugaru")
+            base = re.sub(r"\(.*?\)", "", raw).strip()
+            if base:
+                _add_variant(base)
+                for part in re.split(r"[/,]", base):
+                    if part.strip():
+                        _add_variant(part.strip())
+            # Parenthetical content (e.g. "Gochugaru (고춧가루)" -> "고춧가루")
+            for inner in re.findall(r"\((.*?)\)", raw):
+                _add_variant(inner)
+                for part in re.split(r"[/,]", inner):
+                    if part.strip():
+                        _add_variant(part.strip())
+
+        return variants
+
+    def find_existing_product(
+        self,
+        products: List[Dict[str, Any]],
+        candidate_name: str,
+        alternate_names: Optional[List[str]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Check if candidate product/ingredient name (or any alternate name) matches an existing Grocy product.
+        Supports numeric IDs, exact matches, parenthetical bilingual names, singular/plural, or substrings.
+        """
+        cand_clean = (candidate_name or "").strip()
+        if cand_clean.isdigit():
+            target_id = int(cand_clean)
+            for p in products:
+                if int(p.get("id", -1)) == target_id:
                     return p
 
-        # 3. Substring match for names with >= 2 characters
-        for p in products:
-            p_name = p.get("name", "").strip()
-            p_norm = self._normalize_name(p_name)
-            if len(cand_norm) >= 2 and (cand_norm in p_norm or p_norm in cand_norm):
-                return p
+        cand_variants = self._extract_name_variants(cand_clean, alternate_names)
+        if not cand_variants:
+            return None
+
+        product_entries = [
+            (p, self._extract_name_variants(p.get("name", "")))
+            for p in products
+        ]
+
+        # 1. Exact match on full name, base name, parenthetical alias, or singular/plural form
+        for cv in cand_variants:
+            cv_sing = self._singularize(cv)
+            for p, p_vars in product_entries:
+                for pv in p_vars:
+                    if cv == pv or (len(cv_sing) >= 2 and cv_sing == self._singularize(pv)):
+                        return p
+
+        # 2. Substring match for variants with >= 2 characters
+        for cv in cand_variants:
+            if len(cv) < 2:
+                continue
+            for p, p_vars in product_entries:
+                for pv in p_vars:
+                    if len(pv) >= 2 and (cv in pv or pv in cv):
+                        return p
 
         return None
 
@@ -128,7 +193,7 @@ class RecipeService:
     def normalize_ingredient_list(cls, ingredients: Any) -> List[Dict[str, Any]]:
         """
         Convert raw ingredient input from LLM into a normalized list of dicts:
-        [{'name': str, 'amount': float, 'unit': str, 'location': str}]
+        [{'name': str, 'amount': float, 'unit': str, 'location': str, 'alternate_names': list[str]}]
         """
         if not ingredients:
             return []
@@ -165,15 +230,23 @@ class RecipeService:
 
                 unit = str(item.get("unit") or item.get("note") or "").strip()
                 location = str(item.get("location") or "Pantry").strip()
+                alt_raw = item.get("alternate_names") or item.get("aliases") or []
+                if isinstance(alt_raw, str):
+                    alternate_names = [a.strip() for a in alt_raw.split(",") if a.strip()]
+                elif isinstance(alt_raw, list):
+                    alternate_names = [str(a).strip() for a in alt_raw if str(a).strip()]
+                else:
+                    alternate_names = []
 
-                normalized.append(
-                    {
-                        "name": name,
-                        "amount": amount,
-                        "unit": unit,
-                        "location": location,
-                    }
-                )
+                entry: Dict[str, Any] = {
+                    "name": name,
+                    "amount": amount,
+                    "unit": unit,
+                    "location": location,
+                }
+                if alternate_names:
+                    entry["alternate_names"] = alternate_names
+                normalized.append(entry)
             elif isinstance(item, str) and item.strip():
                 # Fallback for plain string
                 normalized.append(
@@ -261,8 +334,9 @@ class RecipeService:
                 amount = ing["amount"]
                 unit = ing["unit"]
                 loc_preference = ing["location"].strip().lower()
+                alt_names = ing.get("alternate_names")
 
-                matched_prod = self.find_existing_product(products, ing_name)
+                matched_prod = self.find_existing_product(products, ing_name, alternate_names=alt_names)
                 auto_created = False
 
                 if matched_prod:
@@ -341,6 +415,176 @@ class RecipeService:
                 "in_stock": in_stock,
             }
 
+    @classmethod
+    def _resolve_qu_id(cls, qu_map: Dict[str, int], unit: str) -> int:
+        """Resolve a quantity unit name (case-insensitive, singular/plural) to its Grocy ID."""
+        default_qu_id = qu_map.get("Piece", next(iter(qu_map.values()), 2))
+        if not unit or not unit.strip():
+            return default_qu_id
+        u_clean = unit.strip().lower()
+        u_sing = cls._singularize(u_clean)
+        for k, v in qu_map.items():
+            k_lower = k.strip().lower()
+            if k_lower == u_clean or cls._singularize(k_lower) == u_sing:
+                return v
+        return default_qu_id
+
+    async def find_or_create_product(
+        self,
+        client: httpx.AsyncClient,
+        product_name: str,
+        location: str = "Pantry",
+        unit: str = "Piece",
+        alternate_names: Optional[List[str]] = None,
+        products: Optional[List[Dict[str, Any]]] = None,
+        location_map: Optional[Dict[str, int]] = None,
+        qu_map: Optional[Dict[str, int]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Look up an existing Grocy product by name or alternate/bilingual names.
+        If it does not yet exist, automatically create it in Grocy.
+        """
+        if location_map is None:
+            location_map = await self.get_locations(client)
+        if qu_map is None:
+            qu_map = await self.get_quantity_units(client)
+        if products is None:
+            products = await self.get_all_products(client)
+
+        default_pantry_id = location_map.get("pantry", 4)
+        qu_id = self._resolve_qu_id(qu_map, unit)
+
+        matched_prod = self.find_existing_product(products, product_name, alternate_names=alternate_names)
+        if matched_prod:
+            product_id = int(matched_prod["id"])
+            prod_display_name = matched_prod["name"]
+            location_id = int(matched_prod.get("location_id", default_pantry_id))
+            auto_created = False
+        else:
+            clean_name = product_name.strip()
+            loc_preference = (location or "Pantry").strip().lower()
+            location_id = location_map.get(loc_preference, default_pantry_id)
+
+            create_res = await client.post(
+                "/api/objects/products",
+                json={
+                    "name": clean_name,
+                    "location_id": location_id,
+                    "qu_id_purchase": qu_id,
+                    "qu_id_stock": qu_id,
+                    "min_stock_amount": 0,
+                },
+            )
+            create_res.raise_for_status()
+            product_id = int(create_res.json()["created_object_id"])
+            prod_display_name = clean_name
+            auto_created = True
+
+            products.append(
+                {
+                    "id": product_id,
+                    "name": clean_name,
+                    "location_id": location_id,
+                }
+            )
+
+        loc_label = next((k.capitalize() for k, v in location_map.items() if v == location_id), "Pantry")
+        return {
+            "product_id": product_id,
+            "product_name": prod_display_name,
+            "location_id": location_id,
+            "location": loc_label,
+            "auto_created": auto_created,
+        }
+
+    async def add_stock(
+        self,
+        product_name: str,
+        amount: float = 1.0,
+        unit: str = "Piece",
+        location: str = "Pantry",
+        alternate_names: Optional[List[str]] = None,
+        best_before_date: Optional[str] = None,
+        price: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """
+        Add stock for a product in Grocy, automatically creating the product first
+        if it (or an alternate name for it) does not yet exist.
+        """
+        if not product_name or not str(product_name).strip():
+            raise ValueError("Product name is required to add stock.")
+
+        async with httpx.AsyncClient(base_url=self.grocy_url, headers=self._get_headers(), timeout=15.0) as client:
+            prod_info = await self.find_or_create_product(
+                client=client,
+                product_name=str(product_name).strip(),
+                location=location,
+                unit=unit,
+                alternate_names=alternate_names,
+            )
+            product_id = prod_info["product_id"]
+
+            payload: Dict[str, Any] = {"amount": float(amount)}
+            if best_before_date:
+                payload["best_before_date"] = best_before_date
+            if price is not None:
+                payload["price"] = float(price)
+
+            add_res = await client.post(
+                f"/api/stock/products/{product_id}/add",
+                json=payload,
+            )
+            add_res.raise_for_status()
+
+            return {
+                "product_id": product_id,
+                "product_name": prod_info["product_name"],
+                "amount": float(amount),
+                "unit": unit,
+                "location": prod_info["location"],
+                "auto_created": prod_info["auto_created"],
+            }
+
+    async def inventory_stock(
+        self,
+        product_name: str,
+        new_amount: float,
+        unit: str = "Piece",
+        location: str = "Pantry",
+        alternate_names: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Set exact inventory count for a product in Grocy, automatically creating the product first
+        if it (or an alternate name for it) does not yet exist.
+        """
+        if not product_name or not str(product_name).strip():
+            raise ValueError("Product name is required to set inventory stock.")
+
+        async with httpx.AsyncClient(base_url=self.grocy_url, headers=self._get_headers(), timeout=15.0) as client:
+            prod_info = await self.find_or_create_product(
+                client=client,
+                product_name=str(product_name).strip(),
+                location=location,
+                unit=unit,
+                alternate_names=alternate_names,
+            )
+            product_id = prod_info["product_id"]
+
+            inv_res = await client.post(
+                f"/api/stock/products/{product_id}/inventory",
+                json={"new_amount": float(new_amount)},
+            )
+            inv_res.raise_for_status()
+
+            return {
+                "product_id": product_id,
+                "product_name": prod_info["product_name"],
+                "new_amount": float(new_amount),
+                "unit": unit,
+                "location": prod_info["location"],
+                "auto_created": prod_info["auto_created"],
+            }
+
     async def add_ingredient_to_recipe(
         self,
         recipe_identifier: str,
@@ -348,6 +592,7 @@ class RecipeService:
         amount: float = 1.0,
         note: str = "",
         location: str = "Pantry",
+        alternate_names: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """
         Add a single ingredient to a recipe, creating the product with LLM's suggested location if needed.
@@ -356,7 +601,6 @@ class RecipeService:
             location_map = await self.get_locations(client)
             qu_map = await self.get_quantity_units(client)
             default_qu_id = qu_map.get("Piece", 2)
-            default_pantry_id = location_map.get("pantry", 4)
 
             # Find recipe
             recipe_id: Optional[int] = None
@@ -373,29 +617,17 @@ class RecipeService:
                 raise ValueError(f"Recipe '{recipe_identifier}' not found in Grocy.")
 
             # Find or create product
-            products = await self.get_all_products(client)
-            matched_prod = self.find_existing_product(products, product_name)
-            auto_created = False
-
-            if matched_prod:
-                product_id = int(matched_prod["id"])
-                prod_display_name = matched_prod["name"]
-            else:
-                loc_id = location_map.get(location.strip().lower(), default_pantry_id)
-                create_res = await client.post(
-                    "/api/objects/products",
-                    json={
-                        "name": product_name,
-                        "location_id": loc_id,
-                        "qu_id_purchase": default_qu_id,
-                        "qu_id_stock": default_qu_id,
-                        "min_stock_amount": 0,
-                    },
-                )
-                create_res.raise_for_status()
-                product_id = int(create_res.json()["created_object_id"])
-                prod_display_name = product_name
-                auto_created = True
+            prod_info = await self.find_or_create_product(
+                client=client,
+                product_name=product_name,
+                location=location,
+                alternate_names=alternate_names,
+                location_map=location_map,
+                qu_map=qu_map,
+            )
+            product_id = prod_info["product_id"]
+            prod_display_name = prod_info["product_name"]
+            auto_created = prod_info["auto_created"]
 
             await client.post(
                 "/api/objects/recipes_pos",

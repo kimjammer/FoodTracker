@@ -150,6 +150,17 @@ async def handle_receipt_attachment(message: discord.Message) -> None:
         title = parsed_data.get("title") or parsed_data.get("store_name") or "Grocery Scan"
         items: List[Dict[str, Any]] = parsed_data.get("items", [])
 
+        # Check if an error occurred during vision parsing
+        if image_type == "error" or parsed_data.get("error"):
+            err_detail = parsed_data.get("error") or parsed_data.get("summary") or "Could not parse image data."
+            try:
+                if hasattr(message, "add_reaction"):
+                    await message.add_reaction("❌")
+            except Exception:
+                pass
+            await status_msg.edit(content=f"❌ An error occurred while scanning the image: {err_detail}")
+            return
+
         # Check if image was deemed unrelated to groceries
         if image_type == "unrelated":
             summary = parsed_data.get("summary", "This image does not appear to contain groceries or a receipt.")
@@ -188,7 +199,7 @@ async def handle_receipt_attachment(message: discord.Message) -> None:
             qty = item.get("quantity", 1)
             unit = item.get("unit", "Piece")
             location = item.get("location", "Pantry")
-            item_lines.append(f"• **{name}**: {qty} {unit} $\\rightarrow$ *{location}*")
+            item_lines.append(f"• **{name}**: {qty} {unit} → *{location}*")
 
         # Discord embed fields have a 1024 character limit, chunk if necessary
         chunk_text = "\n".join(item_lines)
@@ -203,8 +214,52 @@ async def handle_receipt_attachment(message: discord.Message) -> None:
 
     except Exception as e:
         logger.error(f"Error handling image attachment: {e}", exc_info=True)
+        try:
+            if hasattr(message, "add_reaction"):
+                await message.add_reaction("❌")
+        except Exception:
+            pass
         err_msg = str(e)[:1500]
         await status_msg.edit(content=f"❌ An error occurred while parsing the image: {err_msg}")
+
+
+async def _indicate_query_error(
+    message: discord.Message,
+    destination: Any,
+    error: Exception,
+    status_msg: Optional[discord.Message] = None,
+    use_reply: bool = False,
+) -> None:
+    """Clean up any pending status message, react with ❌, and send an error message to the user."""
+    if status_msg is not None:
+        try:
+            await status_msg.delete()
+        except Exception:
+            pass
+
+    try:
+        if hasattr(message, "add_reaction"):
+            await message.add_reaction("❌")
+    except Exception:
+        pass
+
+    err_msg = str(error)[:1500] or type(error).__name__
+    error_text = f"❌ Error processing request: {err_msg}"
+
+    try:
+        if use_reply and hasattr(message, "reply"):
+            await message.reply(error_text)
+        elif hasattr(destination, "send"):
+            await destination.send(error_text)
+        elif hasattr(message, "reply"):
+            await message.reply(error_text)
+    except Exception as send_err:
+        logger.warning(f"Failed to send error message to primary destination: {send_err}")
+        try:
+            if hasattr(message, "reply"):
+                await message.reply(error_text)
+        except Exception:
+            pass
 
 
 async def handle_user_query(message: discord.Message, bot_user: Optional[discord.User] = None) -> None:
@@ -247,8 +302,7 @@ async def handle_user_query(message: discord.Message, bot_user: Optional[discord
                 await send_chunked_reply(message.channel, response_text)
             except Exception as e:
                 logger.error(f"Error handling DM query: {e}", exc_info=True)
-                err_msg = str(e)[:1500]
-                await message.reply(f"❌ Error processing request: {err_msg}")
+                await _indicate_query_error(message, message.channel, e, status_msg=status_msg, use_reply=True)
         return
 
     # 2. Follow-ups inside an existing Thread
@@ -315,8 +369,7 @@ async def handle_user_query(message: discord.Message, bot_user: Optional[discord
                 await send_chunked_reply(thread, response_text, turn_tag=turn_tag)
             except Exception as e:
                 logger.error(f"Error handling thread query: {e}", exc_info=True)
-                err_msg = str(e)[:1500]
-                await thread.send(f"❌ Error processing request: {err_msg}")
+                await _indicate_query_error(message, thread, e, status_msg=status_msg)
         return
 
     # 3. Main channel user query -> Create a new thread and reply in thread
@@ -353,5 +406,4 @@ async def handle_user_query(message: discord.Message, bot_user: Optional[discord
             await send_chunked_reply(target_dest, response_text, turn_tag=turn_tag)
         except Exception as e:
             logger.error(f"Error handling main query: {e}", exc_info=True)
-            err_msg = str(e)[:1500]
-            await target_dest.send(f"❌ Error processing request: {err_msg}")
+            await _indicate_query_error(message, target_dest, e, status_msg=status_msg)

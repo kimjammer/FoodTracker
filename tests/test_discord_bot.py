@@ -392,3 +392,112 @@ async def test_handle_user_query_in_thread_stops_at_limit():
         mock_agent.assert_not_called()
         msg.reply.assert_called_once()
         assert "limit reached" in msg.reply.call_args[0][0].lower()
+
+
+@pytest.mark.asyncio
+async def test_handle_user_query_indicates_error_on_exception():
+    from app.bot.handlers import handle_user_query
+
+    msg = MagicMock(spec=discord.Message)
+    msg.clean_content = "Add 2 cartons of milk"
+    msg.content = "Add 2 cartons of milk"
+    msg.channel = MagicMock(spec=discord.TextChannel)
+    msg.guild = MagicMock()
+    msg.guild.me.id = 999
+    msg.add_reaction = AsyncMock()
+    msg.reply = AsyncMock()
+
+    mock_thread = MagicMock(spec=discord.Thread)
+    mock_thread.send = AsyncMock()
+    mock_thread.typing.return_value.__aenter__ = AsyncMock()
+    mock_thread.typing.return_value.__aexit__ = AsyncMock()
+    msg.create_thread = AsyncMock(return_value=mock_thread)
+
+    with patch("app.bot.handlers.gemini_kitchen_agent.run_agent_loop", new_callable=AsyncMock) as mock_agent:
+        mock_agent.side_effect = RuntimeError("Grocy connection timed out")
+
+        await handle_user_query(msg)
+
+        msg.add_reaction.assert_called_once_with("❌")
+        mock_thread.send.assert_called_once()
+        assert "❌ Error processing request: Grocy connection timed out" in mock_thread.send.call_args[0][0]
+
+
+@pytest.mark.asyncio
+async def test_receipt_confirmation_view_indicates_partial_errors():
+    items = [
+        {"name": "Whole Milk", "quantity": 1.0, "unit": "Bottle", "location": "Fridge"},
+        {"name": "Bad Item", "quantity": 1.0, "unit": "Piece", "location": "Pantry"},
+    ]
+    view = ReceiptConfirmationView(items=items)
+
+    interaction = MagicMock(spec=discord.Interaction)
+    interaction.response = MagicMock()
+    interaction.response.defer = AsyncMock()
+    interaction.followup = MagicMock()
+    interaction.followup.send = AsyncMock()
+    interaction.message = MagicMock()
+    interaction.message.embeds = [discord.Embed(title="Receipt Scanned")]
+    interaction.message.edit = AsyncMock()
+
+    mock_results = [
+        {"name": "Whole Milk", "quantity": 1.0, "status": "success", "detail": "Added"},
+        {"name": "Bad Item", "quantity": 1.0, "status": "error", "detail": "Error adding stock"},
+    ]
+
+    with patch(
+        "app.bot.views.gemini_kitchen_agent.ingest_receipt_items",
+        new_callable=AsyncMock,
+        return_value=mock_results,
+    ):
+        await view.confirm_add.callback(interaction)
+
+        interaction.message.edit.assert_called_once()
+        edited_embed = interaction.message.edit.call_args[1]["embed"]
+        assert edited_embed.color == discord.Color.orange()
+        assert "1 failed" in edited_embed.footer.text
+
+        interaction.followup.send.assert_called_once()
+        followup_msg = interaction.followup.send.call_args[0][0]
+        assert "⚠️" in followup_msg
+        assert "Bad Item" in followup_msg
+
+
+@pytest.mark.asyncio
+async def test_handle_receipt_attachment_uses_unicode_arrow():
+    from app.bot.handlers import handle_receipt_attachment
+
+    att = MagicMock(spec=discord.Attachment)
+    att.filename = "receipt.jpg"
+    att.content_type = "image/jpeg"
+    att.read = AsyncMock(return_value=b"fake_bytes")
+
+    status_msg = MagicMock(spec=discord.Message)
+    status_msg.edit = AsyncMock()
+
+    msg = MagicMock(spec=discord.Message)
+    msg.attachments = [att]
+    msg.reply = AsyncMock(return_value=status_msg)
+
+    parsed_payload = {
+        "image_type": "receipt",
+        "title": "H-Mart Receipt",
+        "summary": "Scanned 1 item",
+        "items": [{"name": "Tofu (두부)", "quantity": 2.0, "unit": "Pack", "location": "Fridge"}],
+    }
+
+    with patch(
+        "app.bot.handlers.gemini_kitchen_agent.parse_grocery_image",
+        new_callable=AsyncMock,
+        return_value=parsed_payload,
+    ):
+        await handle_receipt_attachment(msg)
+
+        status_msg.edit.assert_called_once()
+        embed = status_msg.edit.call_args[1]["embed"]
+        detected_field = next(f for f in embed.fields if f.name == "Detected Items")
+        assert "→" in detected_field.value
+        assert "rightarrow" not in detected_field.value
+        assert "$" not in detected_field.value
+
+

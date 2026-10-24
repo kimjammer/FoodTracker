@@ -287,3 +287,80 @@ async def test_execute_recipe_create_by_name_tool(monkeypatch):
         ingredients=["김치 1컵"],
         source_url="https://example.com/recipe",
     )
+
+
+@pytest.mark.asyncio
+async def test_execute_stock_add_tool_auto_creates_product(monkeypatch):
+    import app.llm.tools as tools_module
+
+    mock_add_stock = AsyncMock(
+        return_value={
+            "product_id": 55,
+            "product_name": "Gochujang (고추장)",
+            "amount": 1.0,
+            "unit": "Pack",
+            "location": "Fridge",
+            "auto_created": True,
+        }
+    )
+    monkeypatch.setattr(tools_module.recipe_service, "add_stock", mock_add_stock)
+
+    res = await tools_module.execute_tool(
+        "stock_add_tool",
+        {
+            "product": "Gochujang (고추장)",
+            "amount": 1.0,
+            "unit": "Pack",
+            "location": "Fridge",
+            "alternate_names": ["Korean Chili Paste"],
+        },
+    )
+
+    assert "Gochujang (고추장)" in res
+    assert "auto-created product ID: 55" in res
+    assert "Fridge" in res
+    mock_add_stock.assert_called_once_with(
+        product_name="Gochujang (고추장)",
+        amount=1.0,
+        unit="Pack",
+        location="Fridge",
+        alternate_names=["Korean Chili Paste"],
+        best_before_date=None,
+        price=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_agent_loop_indicates_unresolved_tool_error(monkeypatch):
+    import app.llm.client as client_module
+
+    mock_agent = GeminiKitchenAgent(api_key="mock_key", model="gemini-3.5-flash-lite")
+    mock_agent._client = MagicMock()
+
+    mock_call = MagicMock()
+    mock_call.name = "stock_consume_tool"
+    mock_call.args = {"product": "MissingItem", "amount": 1.0}
+
+    first_turn_response = MagicMock()
+    first_turn_response.function_calls = [mock_call]
+
+    # Model returns a polite message that forgets to mention the error
+    final_turn_response = MagicMock()
+    final_turn_response.function_calls = []
+    final_turn_response.text = "All done updating your kitchen!"
+
+    mock_chat = MagicMock()
+    mock_chat.send_message = AsyncMock(side_effect=[first_turn_response, final_turn_response])
+    mock_agent._client.aio.chats.create = MagicMock(return_value=mock_chat)
+
+    monkeypatch.setattr(
+        client_module,
+        "execute_tool",
+        AsyncMock(return_value="Error executing stock_consume_tool: No products found matching 'MissingItem'."),
+    )
+    monkeypatch.setattr(client_module, "get_gemini_tools", AsyncMock(return_value=MagicMock()))
+
+    reply = await mock_agent.run_agent_loop("Consume MissingItem")
+    assert "⚠️" in reply
+    assert "Error executing stock_consume_tool" in reply
+
